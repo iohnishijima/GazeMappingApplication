@@ -9,6 +9,7 @@ import ast
 import csv
 import json
 import datetime
+from collections import deque
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
     QSlider, QColorDialog, QPushButton, QCheckBox, QHBoxLayout, QSizePolicy,
@@ -173,6 +174,7 @@ class GazeApp(QMainWindow):
         self.aoi_start_point = None          # AOIの開始点
         self.is_configured = False           # 設定完了フラグ
         self.reset_requested = False         # カウントリセット要求フラグ
+        self.previous_frame_shape = None
 
         # ドキュメントフォルダ内のGazeVisualizeSoftwareフォルダのパスを取得
         self.base_directory = os.path.join(os.path.expanduser('~/Documents'), 'GazeVisualizeSoftware')
@@ -184,8 +186,9 @@ class GazeApp(QMainWindow):
         self.current_session = None
 
         # 視線データの保持
-        self.gaze_history = []               # 視線座標の履歴
+        # self.gaze_history = []               # 視線座標の履歴
         self.max_history = 100               # デフォルトの履歴フレーム数
+        self.gaze_history = deque(maxlen=self.max_history)  # 視線座標の履歴
         self.heatmap_opacity = 0.5           # ヒートマップの透明度
 
         # レコード関連
@@ -764,9 +767,9 @@ class GazeApp(QMainWindow):
     def change_history(self, value):
         self.max_history = value
         self.history_value_label.setText(str(value))
-        # 履歴を新しい最大値に合わせてトリミング
-        if len(self.gaze_history) > self.max_history:
-            self.gaze_history = self.gaze_history[-self.max_history:]
+        # gaze_historyの最大長を更新
+        self.gaze_history = deque(self.gaze_history, maxlen=self.max_history)
+
 
     def reset_counts(self):
         for aoi in self.aoi_list:
@@ -824,7 +827,7 @@ class GazeApp(QMainWindow):
             return
 
         # ORB特徴量検出器の初期化
-        orb = cv2.ORB_create(nfeatures=500, fastThreshold=7, scaleFactor=1.2,
+        orb = cv2.ORB_create(nfeatures=300, fastThreshold=7, scaleFactor=1.2,
                              nlevels=8, edgeThreshold=31, patchSize=31)
 
         # 基準画像の特徴点と記述子を計算
@@ -842,8 +845,9 @@ class GazeApp(QMainWindow):
 
         # フレームの歪み補正マップの事前計算（仮のフレームサイズで計算）
         # ここでdummy_frameをref_imageと同じサイズにしておく
+        
         dummy_frame = np.zeros_like(ref_image)
-        map1_frame, map2_frame, roi_frame, new_camera_mtx_frame = precompute_undistort_map(dummy_frame.shape)
+        map1_frame, map2_frame, roi_frame, new_camera_mtx_frame = precompute_undistort_map((dummy_frame.shape))
 
         # ZMQアドレスの取得
         zmq_address = self.zmq_address_edit.text()
@@ -861,7 +865,7 @@ class GazeApp(QMainWindow):
         # フレーム更新用のタイマー
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
-        self.timer.start(30)  # 約33FPSで更新
+        self.timer.start(16)  # 約33FPSで更新
 
         # アプリケーション開始時刻を設定
         self.start_time = time.time()
@@ -1150,7 +1154,10 @@ class GazeApp(QMainWindow):
 
             # フレームサイズが変わった可能性があるので、歪み補正マップを再計算
             global map1_frame, map2_frame, roi_frame, new_camera_mtx_frame
-            map1_frame, map2_frame, roi_frame, new_camera_mtx_frame = precompute_undistort_map(frame_proc.shape)
+            # map1_frame, map2_frame, roi_frame, new_camera_mtx_frame = precompute_undistort_map(frame_proc.shape)
+            if self.previous_frame_shape != frame_proc.shape[:2]:
+                map1_frame, map2_frame, roi_frame, new_camera_mtx_frame = precompute_undistort_map(frame_proc.shape)
+                self.previous_frame_shape = frame_proc.shape[:2]
 
             # 視線座標を画像サイズにスケーリング
             h_frame, w_frame = frame_proc.shape[:2]
