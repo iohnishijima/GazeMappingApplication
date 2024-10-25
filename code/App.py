@@ -13,11 +13,12 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
     QSlider, QColorDialog, QPushButton, QCheckBox, QHBoxLayout, QSizePolicy,
     QFileDialog, QLineEdit, QMessageBox, QTextEdit,
-    QSplitter, QAction, QScrollArea, QToolButton, QInputDialog, QMenu, QActionGroup
+    QSplitter, QAction, QScrollArea, QToolButton, QInputDialog, QMenu, QActionGroup, QComboBox
 )
 from PyQt5.QtGui import QImage, QPixmap, QColor, QIcon
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QRectF, QPointF, QPropertyAnimation, QTranslator
 import pyqtgraph as pg
+import os
 
 # グローバル変数の初期化
 camera_matrix = None
@@ -173,6 +174,15 @@ class GazeApp(QMainWindow):
         self.is_configured = False           # 設定完了フラグ
         self.reset_requested = False         # カウントリセット要求フラグ
 
+        # ドキュメントフォルダ内のGazeVisualizeSoftwareフォルダのパスを取得
+        self.base_directory = os.path.join(os.path.expanduser('~/Documents'), 'GazeVisualizeSoftware')
+        os.makedirs(self.base_directory, exist_ok=True)
+
+        # ユーザーリストの取得
+        self.users = self.get_user_list()  # リストとしてユーザーリストを取得
+        self.current_user = None
+        self.current_session = None
+
         # 視線データの保持
         self.gaze_history = []               # 視線座標の履歴
         self.max_history = 100               # デフォルトの履歴フレーム数
@@ -266,8 +276,19 @@ class GazeApp(QMainWindow):
         # サイドバーの初期状態を開いた状態に設定
         self.sidebar_widget.setVisible(True)
 
+        self.record_start_button.setEnabled(False)
+        self.record_stop_button.setEnabled(False)
+
         # メニューアクションの作成
         self.create_menu()
+
+    def get_user_list(self):
+        if os.path.exists(self.base_directory):
+            # ユーザーフォルダ名のリストを取得
+            return [name for name in os.listdir(self.base_directory)
+                    if os.path.isdir(os.path.join(self.base_directory, name))]
+        else:
+            return []
 
     def create_menu(self):
         # メニューバーの作成
@@ -367,9 +388,100 @@ class GazeApp(QMainWindow):
         self.record_start_button.setText(self.tr('レコード開始'))
         self.record_stop_button.setText(self.tr('レコード停止'))
 
+        self.session_start_button.setText(self.tr('セッション開始'))
+        self.session_end_button.setText(self.tr('セッション終了'))
+        self.user_label.setText(self.tr('ユーザー名:'))
+
     def toggle_sidebar(self, state):
         self.sidebar_widget.setVisible(state)
         self.scroll_area.setVisible(state)
+
+    # def user_finished_editing(self):
+    #     user_name = self.user_combobox.currentText().strip()
+    #     if user_name:
+    #         if user_name not in self.users:
+    #             self.user_changed(user_name)
+    #             self.user_combobox.addItem(user_name)
+    #             self.users.append(user_name)
+    #             index = self.user_combobox.findText(user_name)
+    #             self.user_combobox.setCurrentIndex(index)
+    #         else:
+    #             # 既存のユーザー名を入力した場合、そのユーザーを選択
+    #             index = self.user_combobox.findText(user_name)
+    #             if index >= 0:
+    #                 self.user_combobox.setCurrentIndex(index)
+    #     else:
+    #         QMessageBox.warning(self, self.tr("エラー"), self.tr("ユーザー名を入力してください。"))
+
+    def user_finished_editing(self):
+        user_name = self.user_combobox.currentText().strip()
+        if user_name:
+            if user_name not in self.users:
+                self.user_changed(user_name)
+                self.user_combobox.addItem(user_name)
+                self.users.append(user_name)
+                index = self.user_combobox.findText(user_name)
+                self.user_combobox.setCurrentIndex(index)
+            else:
+                # 既存のユーザー名を入力した場合、そのユーザーを選択
+                index = self.user_combobox.findText(user_name)
+                if index >= 0:
+                    self.user_combobox.setCurrentIndex(index)
+        else:
+            QMessageBox.warning(self, self.tr("エラー"), self.tr("ユーザー名を入力してください。"))
+
+    def user_selected(self, index):
+        print("enter user selected")
+        if index >= 0:
+            user_name = self.user_combobox.itemText(index).strip()
+            self.user_changed(user_name)
+
+    def user_changed(self, user_name):
+        self.current_user = user_name
+
+        user_directory = os.path.join(self.base_directory, self.current_user)
+        os.makedirs(user_directory, exist_ok=True)
+
+        # セッションリストを取得
+        self.sessions = self.get_session_list()
+        # 必要に応じてセッション関連のUIを更新
+
+
+    def start_session(self):
+        if not self.current_user:
+            QMessageBox.warning(self, self.tr("エラー"), self.tr("ユーザー名を入力してください。"))
+            return
+
+        # セッション名の入力または選択
+        existing_sessions = self.get_session_list()
+        session_name, ok = QInputDialog.getItem(self, self.tr('セッション名'),
+                                                self.tr('セッションを選択するか新しいセッション名を入力してください:'),
+                                                existing_sessions, editable=True)
+        if ok and session_name:
+            self.current_session = session_name.strip()
+            session_directory = os.path.join(self.base_directory, self.current_user, self.current_session)
+            os.makedirs(session_directory, exist_ok=True)
+            self.session_start_button.setEnabled(False)
+            self.session_end_button.setEnabled(True)
+            self.record_start_button.setEnabled(True)
+            self.record_stop_button.setEnabled(False)
+        else:
+            QMessageBox.warning(self, self.tr("エラー"), self.tr("セッション名を入力してください。"))
+
+    def end_session(self):
+        # レコードを停止
+        self.stop_recording()
+        self.current_session = None
+        self.session_start_button.setEnabled(True)
+        self.session_end_button.setEnabled(False)
+
+    def get_session_list(self):
+        if self.current_user:
+            user_directory = os.path.join(self.base_directory, self.current_user)
+            if os.path.exists(user_directory):
+                return [name for name in os.listdir(user_directory)
+                        if os.path.isdir(os.path.join(user_directory, name))]
+        return []
 
     def create_initial_settings_group(self):
         # 初期設定グループ
@@ -408,6 +520,23 @@ class GazeApp(QMainWindow):
         self.dist_coeffs_label = QLabel(self.tr('歪み係数 (5つ):'))
         layout.addWidget(self.dist_coeffs_label)
         layout.addWidget(self.dist_coeffs_text)
+
+        # ユーザー名の入力
+        user_layout = QHBoxLayout()
+        self.user_label = QLabel(self.tr('ユーザー名:'))
+        self.user_combobox = QComboBox()
+        self.user_combobox.setEditable(True)
+        self.user_combobox.setPlaceholderText(self.tr('ユーザー名を入力または選択'))
+        self.user_combobox.addItems(self.users)
+
+        # シグナルの接続を確認
+        self.user_combobox.currentIndexChanged.connect(self.user_selected)
+        # self.user_combobox.lineEdit().editingFinished.connect(self.user_finished_editing)
+        self.user_combobox.lineEdit().returnPressed.connect(self.user_finished_editing)
+
+        user_layout.addWidget(self.user_label)
+        user_layout.addWidget(self.user_combobox)
+        layout.addLayout(user_layout)
 
         # 設定完了ボタン
         self.configure_button = QPushButton(self.tr('設定完了'))
@@ -497,6 +626,22 @@ class GazeApp(QMainWindow):
         self.reset_button.clicked.connect(self.reset_counts)
         layout.addWidget(self.reset_button)
 
+        # # ユーザー名の入力
+        # user_layout = QHBoxLayout()
+        # self.user_label = QLabel(self.tr('ユーザー名:'))
+        # self.user_combobox = QComboBox()
+        # self.user_combobox.setEditable(True)
+        # self.user_combobox.setPlaceholderText(self.tr('ユーザー名を入力または選択'))
+        # self.user_combobox.addItems(self.users)
+
+        # # シグナルの接続
+        # self.user_combobox.currentIndexChanged.connect(self.user_selected)
+        # self.user_combobox.lineEdit().editingFinished.connect(self.user_finished_editing)
+
+        # user_layout.addWidget(self.user_label)
+        # user_layout.addWidget(self.user_combobox)
+        # layout.addLayout(user_layout)
+
         self.other_settings_group.setContentLayout(layout)
 
     def create_heatmap_settings_group(self):
@@ -529,10 +674,10 @@ class GazeApp(QMainWindow):
         history_layout = QHBoxLayout()
         self.history_slider = QSlider(Qt.Horizontal)
         self.history_slider.setMinimum(1)
-        self.history_slider.setMaximum(500)
+        self.history_slider.setMaximum(1000)
         self.history_slider.setValue(self.max_history)
         self.history_slider.setTickPosition(QSlider.TicksBelow)
-        self.history_slider.setTickInterval(50)
+        self.history_slider.setTickInterval(100)
         self.history_slider.valueChanged.connect(self.change_history)
         self.history_label = QLabel(self.tr('履歴フレーム数:'))
         self.history_value_label = QLabel(str(self.max_history))
@@ -555,6 +700,18 @@ class GazeApp(QMainWindow):
         csv_layout.addWidget(self.csv_label)
         csv_layout.addWidget(self.csv_filename_edit)
         layout.addLayout(csv_layout)
+
+        # セッション開始・終了ボタン
+        session_layout = QHBoxLayout()
+        self.session_start_button = QPushButton(self.tr('セッション開始'))
+        self.session_start_button.clicked.connect(self.start_session)
+        self.session_end_button = QPushButton(self.tr('セッション終了'))
+        self.session_end_button.clicked.connect(self.end_session)
+        self.session_end_button.setEnabled(False)  # 初期状態ではセッション終了ボタンは無効
+        session_layout.addWidget(self.session_start_button)
+        session_layout.addWidget(self.session_end_button)
+        layout.addLayout(session_layout)
+
 
         # レコード開始・停止ボタン
         record_layout = QHBoxLayout()
@@ -660,6 +817,10 @@ class GazeApp(QMainWindow):
                 raise ValueError
         except Exception:
             QMessageBox.warning(self, self.tr("エラー"), self.tr("歪み係数の値を正しく入力してください。"))
+            return
+        
+        if not self.current_user:
+            QMessageBox.warning(self, self.tr("エラー"), self.tr("ユーザー名を入力してください。"))
             return
 
         # ORB特徴量検出器の初期化
@@ -900,19 +1061,31 @@ class GazeApp(QMainWindow):
                         break
 
     def start_recording(self):
-        if not self.is_configured:
-            QMessageBox.warning(self, self.tr("エラー"), self.tr("設定を完了してください。"))
+        if not self.current_session:
+            QMessageBox.warning(self, self.tr("エラー"), self.tr("セッションを開始してください。"))
             return
         self.is_recording = True
         self.recorded_data = []
         self.frame_counter = 0
-        self.csv_filename = self.csv_filename_edit.text()
+
+        # 保存先ディレクトリの設定
+        self.session_directory = os.path.join(self.base_directory, self.current_user, self.current_session)
+        os.makedirs(self.session_directory, exist_ok=True)
+
+        # CSVファイル名の決定
+        base_csv_filename = "recorded_data.csv"
+        csv_filename = os.path.join(self.session_directory, base_csv_filename)
+        index = 1
+        while os.path.exists(csv_filename):
+            csv_filename = os.path.join(self.session_directory, f"recorded_data({index}).csv")
+            index += 1
+        self.csv_filename = csv_filename
 
         self.csv_filename_edit.setEnabled(False)
         # ボタンの有効・無効を切り替え
         self.record_start_button.setEnabled(False)
         self.record_stop_button.setEnabled(True)
-
+        
     def stop_recording(self):
         self.is_recording = False
         # CSVファイルにデータを保存
@@ -931,6 +1104,7 @@ class GazeApp(QMainWindow):
         # ボタンの有効・無効を切り替え
         self.record_start_button.setEnabled(True)
         self.record_stop_button.setEnabled(False)
+
 
     def update_statistics(self):
         # 統計情報レイアウトをクリア
