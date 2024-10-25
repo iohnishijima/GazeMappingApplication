@@ -277,10 +277,10 @@ class GazeApp(QMainWindow):
 
     def change_language(self, language_code):
         if language_code == 'ja':
-            self.translator.load('ja.qm')
+            self.translator.load('../data/ja.qm')
             self.current_language = 'ja'
         elif language_code == 'en':
-            self.translator.load('en.qm')
+            self.translator.load('../data/en.qm')
             self.current_language = 'en'
         QApplication.instance().installTranslator(self.translator)
         self.retranslate_ui()
