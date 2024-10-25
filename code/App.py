@@ -91,7 +91,6 @@ class CollapsibleBox(QWidget):
         self.toggle_button.clicked.connect(self.on_toggle)
 
         self.content_area = QWidget()
-        # self.content_area.setMaximumHeight(0)
         self.content_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.content_area.setMinimumHeight(0)
@@ -285,8 +284,11 @@ class GazeApp(QMainWindow):
         self.size_slider.setTickPosition(QSlider.TicksBelow)
         self.size_slider.setTickInterval(5)
         self.size_slider.valueChanged.connect(self.change_point_size)
-        size_layout.addWidget(QLabel('視線ポイントのサイズ:'))
+        size_label = QLabel('視線ポイントのサイズ:')
+        self.size_value_label = QLabel(str(self.gaze_point_size))
+        size_layout.addWidget(size_label)
         size_layout.addWidget(self.size_slider)
+        size_layout.addWidget(self.size_value_label)
         layout.addLayout(size_layout)
 
         # 視線ポイントの透明度調整スライダー
@@ -298,16 +300,18 @@ class GazeApp(QMainWindow):
         self.opacity_slider.setTickPosition(QSlider.TicksBelow)
         self.opacity_slider.setTickInterval(10)
         self.opacity_slider.valueChanged.connect(self.change_opacity)
-        opacity_layout.addWidget(QLabel('視線ポイントの透明度:'))
+        opacity_label = QLabel('視線ポイントの透明度:')
+        self.opacity_value_label = QLabel(str(int(self.gaze_point_opacity * 100)))
+        opacity_layout.addWidget(opacity_label)
         opacity_layout.addWidget(self.opacity_slider)
+        opacity_layout.addWidget(self.opacity_value_label)
         layout.addLayout(opacity_layout)
 
         # 視線ポイントの色選択ボタン
         color_layout = QHBoxLayout()
         self.color_button = QPushButton('視線ポイントの色を選択')
         self.color_button.clicked.connect(self.select_color)
-        color_layout.addWidget(self.color_button)
-        layout.addLayout(color_layout)
+        layout.addWidget(self.color_button)
 
         # FPS表示のチェックボックス
         fps_layout = QHBoxLayout()
@@ -331,20 +335,21 @@ class GazeApp(QMainWindow):
         self.scene_opacity_slider.setMinimum(0)
         self.scene_opacity_slider.setMaximum(100)
         self.scene_opacity_slider.setValue(int(self.scene_opacity * 100))
-        scene_opacity_slider_label = QLabel('シーンカメラの透明度:')
         self.scene_opacity_slider.setTickPosition(QSlider.TicksBelow)
         self.scene_opacity_slider.setTickInterval(10)
         self.scene_opacity_slider.valueChanged.connect(self.change_scene_opacity)
-        scene_opacity_layout.addWidget(scene_opacity_slider_label)
+        scene_opacity_label = QLabel('シーンカメラの透明度:')
+        self.scene_opacity_value_label = QLabel(str(int(self.scene_opacity * 100)))
+        scene_opacity_layout.addWidget(scene_opacity_label)
         scene_opacity_layout.addWidget(self.scene_opacity_slider)
+        scene_opacity_layout.addWidget(self.scene_opacity_value_label)
         layout.addLayout(scene_opacity_layout)
 
         # カウントリセットボタン
         reset_layout = QHBoxLayout()
         self.reset_button = QPushButton('カウントリセット')
         self.reset_button.clicked.connect(self.reset_counts)
-        reset_layout.addWidget(self.reset_button)
-        layout.addLayout(reset_layout)
+        layout.addWidget(self.reset_button)
 
         self.other_settings_group.setContentLayout(layout)
 
@@ -367,8 +372,11 @@ class GazeApp(QMainWindow):
         self.heatmap_opacity_slider.setTickPosition(QSlider.TicksBelow)
         self.heatmap_opacity_slider.setTickInterval(10)
         self.heatmap_opacity_slider.valueChanged.connect(self.change_heatmap_opacity)
-        heatmap_opacity_layout.addWidget(QLabel('ヒートマップの透明度:'))
+        heatmap_opacity_label = QLabel('ヒートマップの透明度:')
+        self.heatmap_opacity_value_label = QLabel(str(int(self.heatmap_opacity * 100)))
+        heatmap_opacity_layout.addWidget(heatmap_opacity_label)
         heatmap_opacity_layout.addWidget(self.heatmap_opacity_slider)
+        heatmap_opacity_layout.addWidget(self.heatmap_opacity_value_label)
         layout.addLayout(heatmap_opacity_layout)
 
         # ヒートマップの履歴フレーム数
@@ -380,17 +388,25 @@ class GazeApp(QMainWindow):
         self.history_slider.setTickPosition(QSlider.TicksBelow)
         self.history_slider.setTickInterval(50)
         self.history_slider.valueChanged.connect(self.change_history)
-        history_layout.addWidget(QLabel('履歴フレーム数:'))
+        history_label = QLabel('履歴フレーム数:')
+        self.history_value_label = QLabel(str(self.max_history))
+        history_layout.addWidget(history_label)
         history_layout.addWidget(self.history_slider)
+        history_layout.addWidget(self.history_value_label)
         layout.addLayout(history_layout)
 
         self.heatmap_settings_group.setContentLayout(layout)
 
     def change_heatmap_opacity(self, value):
         self.heatmap_opacity = value / 100.0
+        self.heatmap_opacity_value_label.setText(str(value))
 
     def change_history(self, value):
         self.max_history = value
+        self.history_value_label.setText(str(value))
+        # 履歴を新しい最大値に合わせてトリミング
+        if len(self.gaze_history) > self.max_history:
+            self.gaze_history = self.gaze_history[-self.max_history:]
 
     def reset_counts(self):
         for aoi in self.aoi_list:
@@ -481,12 +497,15 @@ class GazeApp(QMainWindow):
 
     def change_point_size(self, value):
         self.gaze_point_size = value
+        self.size_value_label.setText(str(value))
 
     def change_opacity(self, value):
         self.gaze_point_opacity = value / 100.0
+        self.opacity_value_label.setText(str(value))
 
     def change_scene_opacity(self, value):
         self.scene_opacity = value / 100.0
+        self.scene_opacity_value_label.setText(str(value))
 
     def select_color(self):
         color = QColorDialog.getColor()
@@ -642,8 +661,16 @@ class GazeApp(QMainWindow):
                             heatmap = cv2.GaussianBlur(heatmap, (0, 0), sigmaX=15, sigmaY=15)
                             heatmap = cv2.normalize(heatmap, None, 0, 255, cv2.NORM_MINMAX)
                             heatmap_color = cv2.applyColorMap(heatmap.astype(np.uint8), cv2.COLORMAP_JET)
-                            cv2.addWeighted(heatmap_color, self.heatmap_opacity,
-                                            ref_image_display, 1 - self.heatmap_opacity, 0, ref_image_display)
+
+                            # 強度に基づいたアルファマスクを作成
+                            alpha_mask = heatmap / 255.0 * self.heatmap_opacity
+                            alpha_mask = cv2.merge([alpha_mask, alpha_mask, alpha_mask])
+
+                            # ヒートマップを適用
+                            ref_image_display = ref_image_display.astype(np.float32) / 255.0
+                            heatmap_color = heatmap_color.astype(np.float32) / 255.0
+                            ref_image_display = (1 - alpha_mask) * ref_image_display + alpha_mask * heatmap_color
+                            ref_image_display = (ref_image_display * 255).astype(np.uint8)
 
                         # 視線ポイントの透明度を適用
                         overlay = ref_image_display.copy()
