@@ -8,14 +8,16 @@ import time
 import ast
 import csv
 import json
+import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
     QSlider, QColorDialog, QPushButton, QCheckBox, QHBoxLayout, QSizePolicy,
     QFileDialog, QLineEdit, QMessageBox, QTextEdit,
     QSplitter, QAction, QScrollArea, QToolButton, QInputDialog, QMenu, QActionGroup
 )
-from PyQt5.QtGui import QImage, QPixmap, QColor, QIcon, QContextMenuEvent, QCloseEvent
+from PyQt5.QtGui import QImage, QPixmap, QColor, QIcon
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QRectF, QPointF, QPropertyAnimation, QTranslator
+import pyqtgraph as pg
 
 # グローバル変数の初期化
 camera_matrix = None
@@ -34,7 +36,7 @@ new_camera_mtx_frame = None
 # スレッド間で共有する変数
 frame_lock = threading.Lock()
 frame_available = threading.Event()
-shared_data = {'frame': None, 'gaze_x': None, 'gaze_y': None, 'frame_num': None}
+shared_data = {'frame': None, 'gaze_x': None, 'gaze_y': None, 'frame_num': None, 'score_right': None, 'score_left': None, 'system_time': None}
 
 # 歪み補正マップの事前計算関数
 def precompute_undistort_map(image_shape):
@@ -62,6 +64,9 @@ def receive_frames(zmq_address):
         frame_num = message['frame']
         gaze_x = message['gaze_x']
         gaze_y = message['gaze_y']
+        score_right = message.get('score_right', 0)
+        score_left = message.get('score_left', 0)
+        system_time = message.get('system_time', None)
         encoded_image = message['image']
 
         # 画像データをデコード
@@ -74,6 +79,9 @@ def receive_frames(zmq_address):
             shared_data['gaze_x'] = gaze_x
             shared_data['gaze_y'] = gaze_y
             shared_data['frame_num'] = frame_num  # PicNumとして使用
+            shared_data['score_right'] = score_right
+            shared_data['score_left'] = score_left
+            shared_data['system_time'] = system_time
         frame_available.set()
 
 # AOIを管理するクラス
@@ -81,8 +89,19 @@ class AOI:
     def __init__(self, rect, name=''):
         self.rect = rect  # QRectF
         self.hit_count = 0
+        self.dwell_time = 0.0  # 滞在時間（秒）
+        self.entry_time = None  # 視線が入った時刻（system_time）
         self.is_gaze_inside = False  # 視線が内側にあるか
         self.name = name  # AOIの名前
+
+
+class TimeAxisItem(pg.AxisItem):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def tickStrings(self, values, scale, spacing):
+        # タイムスタンプを 'HH:MM:SS' 形式に変換
+        return [datetime.datetime.fromtimestamp(value).strftime('%H:%M:%S') for value in values]
 
 # 折りたたみ可能なグループボックス
 class CollapsibleBox(QWidget):
@@ -165,6 +184,14 @@ class GazeApp(QMainWindow):
         self.frame_counter = 0  # ソフトウェア内のフレーム番号
         self.csv_filename = "recorded_data.csv"
 
+        # グラフ用のデータバッファ
+        self.graph_data_right = []
+        self.graph_data_left = []
+        self.graph_time = []
+
+        # アプリケーション開始時刻
+        self.start_time = None  # 初期化はapply_settings内で行う
+
         # UIのセットアップ
         self.init_ui()
 
@@ -207,11 +234,19 @@ class GazeApp(QMainWindow):
         # レコード設定グループの作成
         self.create_record_settings_group()
 
+        # 統計情報グループの作成
+        self.create_statistics_group()
+
+        # グラフ表示グループの作成
+        self.create_graph_group()
+
         # サイドバーにグループを追加
         self.sidebar_layout.addWidget(self.initial_settings_group)
         self.sidebar_layout.addWidget(self.other_settings_group)
         self.sidebar_layout.addWidget(self.heatmap_settings_group)
         self.sidebar_layout.addWidget(self.record_settings_group)
+        self.sidebar_layout.addWidget(self.statistics_group)
+        self.sidebar_layout.addWidget(self.graph_group)
         self.sidebar_layout.addStretch()
 
         # 画像表示エリア
@@ -300,6 +335,8 @@ class GazeApp(QMainWindow):
         self.other_settings_group.toggle_button.setText(self.tr('その他の設定'))
         self.heatmap_settings_group.toggle_button.setText(self.tr('ヒートマップ設定'))
         self.record_settings_group.toggle_button.setText(self.tr('レコード設定'))
+        self.statistics_group.toggle_button.setText(self.tr('統計情報'))
+        self.graph_group.toggle_button.setText(self.tr('リアルタイムグラフ'))
 
         # 初期設定グループ内のウィジェット
         self.image_browse_button.setText(self.tr('参照'))
@@ -532,6 +569,37 @@ class GazeApp(QMainWindow):
 
         self.record_settings_group.setContentLayout(layout)
 
+    def create_statistics_group(self):
+        # 統計情報グループ
+        self.statistics_group = CollapsibleBox(self.tr('統計情報'))
+        layout = QVBoxLayout()
+
+        # AOI統計情報の表示用レイアウト
+        self.statistics_layout = QVBoxLayout()
+        layout.addLayout(self.statistics_layout)
+
+        self.statistics_group.setContentLayout(layout)
+
+    def create_graph_group(self):
+        # グラフ表示グループ
+        self.graph_group = CollapsibleBox(self.tr('リアルタイムグラフ'))
+        layout = QVBoxLayout()
+
+        # プロットウィジェットの作成
+        time_axis = TimeAxisItem(orientation='bottom')
+        self.plot_widget = pg.PlotWidget(axisItems={'bottom': time_axis})
+        # self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setBackground('w')
+        self.plot_widget.addLegend()
+        self.plot_widget.showGrid(x=True, y=True)
+
+        # データラインの作成
+        self.score_right_line = self.plot_widget.plot(pen='r', name='Score Right')
+        self.score_left_line = self.plot_widget.plot(pen='b', name='Score Left')
+
+        layout.addWidget(self.plot_widget)
+        self.graph_group.setContentLayout(layout)
+
     def change_heatmap_opacity(self, value):
         self.heatmap_opacity = value / 100.0
         self.heatmap_opacity_value_label.setText(str(value))
@@ -546,6 +614,10 @@ class GazeApp(QMainWindow):
     def reset_counts(self):
         for aoi in self.aoi_list:
             aoi.hit_count = 0
+            aoi.dwell_time = 0.0
+            aoi.entry_time = None
+        # 統計情報を更新
+        self.update_statistics()
 
     def browse_image(self):
         options = QFileDialog.Options()
@@ -629,6 +701,9 @@ class GazeApp(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(30)  # 約33FPSで更新
+
+        # アプリケーション開始時刻を設定
+        self.start_time = time.time()
 
     def change_point_size(self, value):
         self.gaze_point_size = value
@@ -843,7 +918,7 @@ class GazeApp(QMainWindow):
         # CSVファイルにデータを保存
         try:
             with open(self.csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['Frame', 'PicNum', 'GazeX', 'GazeY', 'AOI']
+                fieldnames = ['Frame', 'PicNum', 'GazeX', 'GazeY', 'AOI', 'ScoreRight', 'ScoreLeft', 'SystemTime']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
                 for data in self.recorded_data:
@@ -857,9 +932,27 @@ class GazeApp(QMainWindow):
         self.record_start_button.setEnabled(True)
         self.record_stop_button.setEnabled(False)
 
-    def reset_counts(self):
+    def update_statistics(self):
+        # 統計情報レイアウトをクリア
+        for i in reversed(range(self.statistics_layout.count())):
+            widget_to_remove = self.statistics_layout.itemAt(i).widget()
+            self.statistics_layout.removeWidget(widget_to_remove)
+            widget_to_remove.setParent(None)
+
+        # AOIごとの統計情報を表示
         for aoi in self.aoi_list:
-            aoi.hit_count = 0
+            name = aoi.name if aoi.name else self.tr('無名')
+            hit_count = aoi.hit_count
+            dwell_time = aoi.dwell_time
+            if aoi.is_gaze_inside and aoi.entry_time is not None:
+                # 現在の滞在時間を加算
+                current_dwell = self.current_system_time - aoi.entry_time
+            else:
+                current_dwell = 0.0
+            total_dwell_time = dwell_time + current_dwell
+            label_text = f"{name} - {self.tr('ヒット数')}: {hit_count}, {self.tr('滞在時間')}: {total_dwell_time:.2f}s"
+            label = QLabel(label_text)
+            self.statistics_layout.addWidget(label)
 
     def update_frame(self, draw_aoi_preview=False):
         if not self.is_configured:
@@ -874,6 +967,9 @@ class GazeApp(QMainWindow):
                 gaze_x = shared_data['gaze_x']
                 gaze_y = shared_data['gaze_y']
                 pic_num = shared_data['frame_num']
+                score_right = shared_data['score_right']
+                score_left = shared_data['score_left']
+                system_time_str = shared_data['system_time']
 
             if frame_proc is None:
                 return
@@ -978,17 +1074,30 @@ class GazeApp(QMainWindow):
                         cv2.addWeighted(overlay, self.gaze_point_opacity,
                                         ref_image_display, 1 - self.gaze_point_opacity, 0, ref_image_display)
 
+                        # 現在のsystem_timeを保持
+                        self.current_system_time = self.parse_system_time(system_time_str)
+
                         # AOIの処理
                         gaze_aoi_name = ''
                         for aoi in self.aoi_list:
                             # AOIの矩形を取得
                             rect = aoi.rect
                             # 視線がAOI内にあるかチェック
-                            if rect.contains(QPointF(x_ref, y_ref)):
+                            gaze_inside = rect.contains(QPointF(x_ref, y_ref))
+
+                            if gaze_inside:
+                                if not aoi.is_gaze_inside:
+                                    # 視線がAOIに入った
+                                    aoi.hit_count += 1
+                                    aoi.entry_time = self.current_system_time
                                 aoi.is_gaze_inside = True
-                                aoi.hit_count += 1
                                 gaze_aoi_name = aoi.name
                             else:
+                                if aoi.is_gaze_inside:
+                                    # 視線がAOIから出た
+                                    if aoi.entry_time is not None:
+                                        aoi.dwell_time += self.current_system_time - aoi.entry_time
+                                        aoi.entry_time = None
                                 aoi.is_gaze_inside = False
 
                             # AOIの描画
@@ -1015,7 +1124,12 @@ class GazeApp(QMainWindow):
                             cv2.putText(ref_image_display, display_text, (text_x, text_y),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, rect_color, 1)
 
+                        # 統計情報の更新
+                        self.update_statistics()
+
                         # AOIを描画中の場合、プレビューを表示
+                        # if self.drawing_aoi and draw_aoi_preview:
+                                                        # AOIを描画中の場合、プレビューを表示
                         if self.drawing_aoi and draw_aoi_preview:
                             start = self.aoi_start_point
                             end = self.aoi_end_point
@@ -1028,8 +1142,10 @@ class GazeApp(QMainWindow):
                                 pixmap_width = pixmap.width()
                                 pixmap_height = pixmap.height()
                                 # 画像がラベル内でどのように配置されているかを計算
-                                scaled_w = pixmap_width * min(label_width / pixmap_width, label_height / pixmap_height)
-                                scaled_h = pixmap_height * min(label_width / pixmap_width, label_height / pixmap_height)
+                                scaled_w = pixmap_width * min(
+                                    label_width / pixmap_width, label_height / pixmap_height)
+                                scaled_h = pixmap_height * min(
+                                    label_width / pixmap_width, label_height / pixmap_height)
                                 offset_x = (label_width - scaled_w) / 2
                                 offset_y = (label_height - scaled_h) / 2
                                 scale_x = pixmap_width / scaled_w
@@ -1039,7 +1155,7 @@ class GazeApp(QMainWindow):
                                 end_x = (end.x() - offset_x) * scale_x
                                 end_y = (end.y() - offset_y) * scale_y
                                 cv2.rectangle(ref_image_display, (int(start_x), int(start_y)),
-                                              (int(end_x), int(end_y)), (255, 0, 0), 1)
+                                                (int(end_x), int(end_y)), (255, 0, 0), 1)
 
                         # FPSの計算
                         current_time = time.time()
@@ -1055,6 +1171,27 @@ class GazeApp(QMainWindow):
                         # 画像をQt形式に変換して表示
                         self.display_image(ref_image_display)
 
+                        # グラフデータの更新
+                        # self.graph_time.append(self.current_system_time - self.start_time)
+                        # self.graph_data_right.append(score_right)
+                        # self.graph_data_left.append(score_left)
+
+                        current_time = self.current_system_time
+                        self.graph_time.append(current_time)
+                        self.graph_data_right.append(score_right)
+                        self.graph_data_left.append(score_left)
+
+                        # バッファのサイズを制限
+                        max_points = 100  # 表示する最大ポイント数
+                        if len(self.graph_time) > max_points:
+                            self.graph_time = self.graph_time[-max_points:]
+                            self.graph_data_right = self.graph_data_right[-max_points:]
+                            self.graph_data_left = self.graph_data_left[-max_points:]
+
+                        # グラフのプロットを更新
+                        self.score_right_line.setData(self.graph_time, self.graph_data_right)
+                        self.score_left_line.setData(self.graph_time, self.graph_data_left)
+
                         # レコード中の場合、データを記録
                         if self.is_recording:
                             self.frame_counter += 1
@@ -1063,9 +1200,23 @@ class GazeApp(QMainWindow):
                                 'PicNum': pic_num,
                                 'GazeX': x_ref,
                                 'GazeY': y_ref,
-                                'AOI': gaze_aoi_name
+                                'AOI': gaze_aoi_name,
+                                'ScoreRight': score_right,
+                                'ScoreLeft': score_left,
+                                'SystemTime': system_time_str
                             }
                             self.recorded_data.append(data)
+
+    def parse_system_time(self, system_time_str):
+        # '2024:9:3:13:32:3:585' の形式をパース
+        try:
+            parts = system_time_str.split(':')
+            year, month, day, hour, minute, second, millisecond = map(int, parts)
+            dt = datetime.datetime(year, month, day, hour, minute, second, millisecond * 1000)
+            timestamp = dt.timestamp()
+            return timestamp
+        except Exception:
+            return time.time()
 
     def display_image(self, img):
         # BGRからRGBに変換
