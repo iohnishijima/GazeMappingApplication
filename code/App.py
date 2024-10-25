@@ -10,10 +10,10 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
     QSlider, QColorDialog, QPushButton, QCheckBox, QHBoxLayout, QSizePolicy,
     QFileDialog, QLineEdit, QGridLayout, QMessageBox, QTextEdit, QGroupBox,
-    QSplitter, QAction
+    QSplitter, QAction, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, QGraphicsRectItem
 )
-from PyQt5.QtGui import QImage, QPixmap, QColor, QIcon
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt5.QtGui import QImage, QPixmap, QColor, QIcon, QPainter, QPen
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QRectF, QPointF
 
 # グローバル変数の初期化
 camera_matrix = None
@@ -73,6 +73,13 @@ def receive_frames(zmq_address):
             shared_data['gaze_y'] = gaze_y
         frame_available.set()
 
+# AOIを管理するクラス
+class AOI:
+    def __init__(self, rect):
+        self.rect = rect  # QRectF
+        self.hit_count = 0
+        self.is_gaze_inside = False  # 視線が内側にあるか
+
 # PyQtアプリケーション
 class GazeApp(QMainWindow):
     def __init__(self):
@@ -89,9 +96,11 @@ class GazeApp(QMainWindow):
         self.fps = 0
         self.overlay_scene = False           # シーンカメラのオーバーレイ表示フラグ
         self.scene_opacity = 0.5             # シーンカメラの透明度
-
-        # 設定完了フラグ
-        self.is_configured = False
+        self.aoi_list = []                   # AOIのリスト
+        self.drawing_aoi = False             # AOIを描画中かどうか
+        self.aoi_start_point = None          # AOIの開始点
+        self.is_configured = False           # 設定完了フラグ
+        self.reset_requested = False         # カウントリセット要求フラグ
 
         # UIのセットアップ
         self.init_ui()
@@ -129,10 +138,13 @@ class GazeApp(QMainWindow):
         self.sidebar_layout.addWidget(self.other_settings_group)
         self.sidebar_layout.addStretch()
 
-        # 画像表示ラベル
+        # 画像表示エリア
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.image_label.mousePressEvent = self.image_mouse_press_event
+        self.image_label.mouseMoveEvent = self.image_mouse_move_event
+        self.image_label.mouseReleaseEvent = self.image_mouse_release_event
 
         # サイドバーと画像ラベルをスプリッターに追加
         self.splitter.addWidget(self.sidebar)
@@ -267,7 +279,18 @@ class GazeApp(QMainWindow):
         scene_opacity_layout.addWidget(self.scene_opacity_slider)
         layout.addLayout(scene_opacity_layout)
 
+        # カウントリセットボタン
+        reset_layout = QHBoxLayout()
+        self.reset_button = QPushButton('カウントリセット')
+        self.reset_button.clicked.connect(self.reset_counts)
+        reset_layout.addWidget(self.reset_button)
+        layout.addLayout(reset_layout)
+
         self.other_settings_group.setLayout(layout)
+
+    def reset_counts(self):
+        for aoi in self.aoi_list:
+            aoi.hit_count = 0
 
     def browse_image(self):
         options = QFileDialog.Options()
@@ -374,12 +397,57 @@ class GazeApp(QMainWindow):
     def toggle_overlay(self, state):
         self.overlay_scene = state == Qt.Checked
 
-    def update_frame(self):
+    def image_mouse_press_event(self, event):
+        if event.button() == Qt.LeftButton and self.is_configured:
+            self.drawing_aoi = True
+            self.aoi_start_point = event.pos()
+
+    def image_mouse_move_event(self, event):
+        if self.drawing_aoi and self.is_configured:
+            self.aoi_end_point = event.pos()
+            self.update_frame(draw_aoi_preview=True)
+
+    def image_mouse_release_event(self, event):
+        if event.button() == Qt.LeftButton and self.is_configured:
+            self.drawing_aoi = False
+            self.aoi_end_point = event.pos()
+            # AOIの矩形を計算
+            start = self.aoi_start_point
+            end = self.aoi_end_point
+            # 座標を基準画像のスケールに合わせる
+            pixmap = self.image_label.pixmap()
+            if pixmap:
+                label_rect = self.image_label.contentsRect()
+                label_width = label_rect.width()
+                label_height = label_rect.height()
+                pixmap_width = pixmap.width()
+                pixmap_height = pixmap.height()
+                # 画像がラベル内でどのように配置されているかを計算
+                scaled_w = pixmap_width * min(label_width / pixmap_width, label_height / pixmap_height)
+                scaled_h = pixmap_height * min(label_width / pixmap_width, label_height / pixmap_height)
+                offset_x = (label_width - scaled_w) / 2
+                offset_y = (label_height - scaled_h) / 2
+                scale_x = pixmap_width / scaled_w
+                scale_y = pixmap_height / scaled_h
+                start_x = (start.x() - offset_x) * scale_x
+                start_y = (start.y() - offset_y) * scale_y
+                end_x = (end.x() - offset_x) * scale_x
+                end_y = (end.y() - offset_y) * scale_y
+                rect = QRectF(QPointF(start_x, start_y), QPointF(end_x, end_y))
+                self.aoi_list.append(AOI(rect.normalized()))
+                self.update_frame()
+
+    def reset_counts(self):
+        for aoi in self.aoi_list:
+            aoi.hit_count = 0
+
+    def update_frame(self, draw_aoi_preview=False):
         if not self.is_configured:
             return
 
-        if frame_available.is_set():
-            frame_available.clear()
+        if frame_available.is_set() or draw_aoi_preview:
+            if not draw_aoi_preview:
+                frame_available.clear()
 
             with frame_lock:
                 frame_proc = shared_data['frame']
@@ -465,6 +533,64 @@ class GazeApp(QMainWindow):
                         cv2.addWeighted(overlay, self.gaze_point_opacity,
                                         ref_image_display, 1 - self.gaze_point_opacity, 0, ref_image_display)
 
+                        # AOIの処理
+                        for aoi in self.aoi_list:
+                            # AOIの矩形を取得
+                            rect = aoi.rect
+                            # 視線がAOI内にあるかチェック
+                            if rect.contains(QPointF(x_ref, y_ref)):
+                                aoi.is_gaze_inside = True
+                                aoi.hit_count += 1
+                            else:
+                                aoi.is_gaze_inside = False
+
+                            # AOIの描画
+                            rect_top_left = (int(rect.left()), int(rect.top()))
+                            rect_bottom_right = (int(rect.right()), int(rect.bottom()))
+                            if aoi.is_gaze_inside:
+                                # 視線が内側にある場合の色（例：赤）
+                                rect_color = (0, 0, 255)
+                            else:
+                                # デフォルトの色（例：緑）
+                                rect_color = (0, 255, 0)
+                            cv2.rectangle(ref_image_display, rect_top_left, rect_bottom_right, rect_color, 1)
+
+                            # ヒットカウントをAOIの上に表示
+                            count_text = f'Count: {aoi.hit_count}'
+                            text_size, baseline = cv2.getTextSize(count_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+                            text_x = rect_top_left[0]
+                            text_y = rect_top_left[1] - 5
+                            if text_y < 0:
+                                text_y = rect_bottom_right[1] + text_size[1] + 5
+                            cv2.putText(ref_image_display, count_text, (text_x, text_y),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, rect_color, 1)
+
+                        # AOIを描画中の場合、プレビューを表示
+                        if self.drawing_aoi and draw_aoi_preview:
+                            start = self.aoi_start_point
+                            end = self.aoi_end_point
+                            # 座標を基準画像のスケールに合わせる
+                            pixmap = self.image_label.pixmap()
+                            if pixmap:
+                                label_rect = self.image_label.contentsRect()
+                                label_width = label_rect.width()
+                                label_height = label_rect.height()
+                                pixmap_width = pixmap.width()
+                                pixmap_height = pixmap.height()
+                                # 画像がラベル内でどのように配置されているかを計算
+                                scaled_w = pixmap_width * min(label_width / pixmap_width, label_height / pixmap_height)
+                                scaled_h = pixmap_height * min(label_width / pixmap_width, label_height / pixmap_height)
+                                offset_x = (label_width - scaled_w) / 2
+                                offset_y = (label_height - scaled_h) / 2
+                                scale_x = pixmap_width / scaled_w
+                                scale_y = pixmap_height / scaled_h
+                                start_x = (start.x() - offset_x) * scale_x
+                                start_y = (start.y() - offset_y) * scale_y
+                                end_x = (end.x() - offset_x) * scale_x
+                                end_y = (end.y() - offset_y) * scale_y
+                                cv2.rectangle(ref_image_display, (int(start_x), int(start_y)),
+                                              (int(end_x), int(end_y)), (255, 0, 0), 1)
+
                         # FPSの計算
                         current_time = time.time()
                         self.fps = 1 / (current_time - self.previous_time)
@@ -487,6 +613,12 @@ class GazeApp(QMainWindow):
         qt_image = QImage(img_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qt_image)
         self.image_label.setPixmap(pixmap)
+
+    def resizeEvent(self, event):
+        # ウィンドウサイズが変更されたときにAOIプレビューを更新
+        if self.is_configured:
+            self.update_frame(draw_aoi_preview=True)
+        super().resizeEvent(event)
 
 # PyQtアプリケーションの実行
 def main():
