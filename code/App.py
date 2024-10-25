@@ -6,11 +6,12 @@ import numpy as np
 import threading
 import time
 import ast
+import csv
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
     QSlider, QColorDialog, QPushButton, QCheckBox, QHBoxLayout, QSizePolicy,
     QFileDialog, QLineEdit, QGridLayout, QMessageBox, QTextEdit,
-    QSplitter, QAction, QScrollArea, QToolButton
+    QSplitter, QAction, QScrollArea, QToolButton, QInputDialog
 )
 from PyQt5.QtGui import QImage, QPixmap, QColor, QIcon
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QRectF, QPointF, QPropertyAnimation
@@ -32,7 +33,7 @@ new_camera_mtx_frame = None
 # スレッド間で共有する変数
 frame_lock = threading.Lock()
 frame_available = threading.Event()
-shared_data = {'frame': None, 'gaze_x': None, 'gaze_y': None}
+shared_data = {'frame': None, 'gaze_x': None, 'gaze_y': None, 'frame_num': None}
 
 # 歪み補正マップの事前計算関数
 def precompute_undistort_map(image_shape):
@@ -71,14 +72,16 @@ def receive_frames(zmq_address):
             shared_data['frame'] = frame_temp.copy()
             shared_data['gaze_x'] = gaze_x
             shared_data['gaze_y'] = gaze_y
+            shared_data['frame_num'] = frame_num  # PicNumとして使用
         frame_available.set()
 
 # AOIを管理するクラス
 class AOI:
-    def __init__(self, rect):
+    def __init__(self, rect, name=''):
         self.rect = rect  # QRectF
         self.hit_count = 0
         self.is_gaze_inside = False  # 視線が内側にあるか
+        self.name = name  # AOIの名前
 
 # 折りたたみ可能なグループボックス
 class CollapsibleBox(QWidget):
@@ -150,6 +153,12 @@ class GazeApp(QMainWindow):
         self.max_history = 100               # デフォルトの履歴フレーム数
         self.heatmap_opacity = 0.5           # ヒートマップの透明度
 
+        # レコード関連
+        self.is_recording = False
+        self.recorded_data = []
+        self.frame_counter = 0  # ソフトウェア内のフレーム番号
+        self.csv_filename = "recorded_data.csv"
+
         # UIのセットアップ
         self.init_ui()
 
@@ -189,10 +198,14 @@ class GazeApp(QMainWindow):
         # ヒートマップ設定グループの作成
         self.create_heatmap_settings_group()
 
+        # レコード設定グループの作成
+        self.create_record_settings_group()
+
         # サイドバーにグループを追加
         self.sidebar_layout.addWidget(self.initial_settings_group)
         self.sidebar_layout.addWidget(self.other_settings_group)
         self.sidebar_layout.addWidget(self.heatmap_settings_group)
+        self.sidebar_layout.addWidget(self.record_settings_group)
         self.sidebar_layout.addStretch()
 
         # 画像表示エリア
@@ -202,6 +215,7 @@ class GazeApp(QMainWindow):
         self.image_label.mousePressEvent = self.image_mouse_press_event
         self.image_label.mouseMoveEvent = self.image_mouse_move_event
         self.image_label.mouseReleaseEvent = self.image_mouse_release_event
+        self.image_label.mouseDoubleClickEvent = self.image_mouse_double_click_event  # ダブルクリックイベント
 
         # サイドバーと画像ラベルをスプリッターに追加
         self.splitter.addWidget(self.scroll_area)
@@ -397,6 +411,31 @@ class GazeApp(QMainWindow):
 
         self.heatmap_settings_group.setContentLayout(layout)
 
+    def create_record_settings_group(self):
+        # レコード設定グループ
+        self.record_settings_group = CollapsibleBox('レコード設定')
+        layout = QVBoxLayout()
+
+        # CSVファイル名の入力
+        csv_layout = QHBoxLayout()
+        self.csv_filename_edit = QLineEdit(self.csv_filename)
+        csv_layout.addWidget(QLabel('CSVファイル名:'))
+        csv_layout.addWidget(self.csv_filename_edit)
+        layout.addLayout(csv_layout)
+
+        # レコード開始・停止ボタン
+        record_layout = QHBoxLayout()
+        self.record_start_button = QPushButton('レコード開始')
+        self.record_start_button.clicked.connect(self.start_recording)
+        self.record_stop_button = QPushButton('レコード停止')
+        self.record_stop_button.clicked.connect(self.stop_recording)
+        self.record_stop_button.setEnabled(False)  # 初期状態では停止ボタンは無効
+        record_layout.addWidget(self.record_start_button)
+        record_layout.addWidget(self.record_stop_button)
+        layout.addLayout(record_layout)
+
+        self.record_settings_group.setContentLayout(layout)
+
     def change_heatmap_opacity(self, value):
         self.heatmap_opacity = value / 100.0
         self.heatmap_opacity_value_label.setText(str(value))
@@ -522,6 +561,29 @@ class GazeApp(QMainWindow):
 
     def image_mouse_press_event(self, event):
         if event.button() == Qt.LeftButton and self.is_configured:
+            # クリック位置を基準画像の座標に変換
+            pos = event.pos()
+            pixmap = self.image_label.pixmap()
+            if pixmap:
+                label_rect = self.image_label.contentsRect()
+                label_width = label_rect.width()
+                label_height = label_rect.height()
+                pixmap_width = pixmap.width()
+                pixmap_height = pixmap.height()
+                scaled_w = pixmap_width * min(label_width / pixmap_width, label_height / pixmap_height)
+                scaled_h = pixmap_height * min(label_width / pixmap_width, label_height / pixmap_height)
+                offset_x = (label_width - scaled_w) / 2
+                offset_y = (label_height - scaled_h) / 2
+                scale_x = pixmap_width / scaled_w
+                scale_y = pixmap_height / scaled_h
+                x = (pos.x() - offset_x) * scale_x
+                y = (pos.y() - offset_y) * scale_y
+                # クリック位置が既存のAOI内にあるかチェック
+                for aoi in reversed(self.aoi_list):
+                    if aoi.rect.contains(QPointF(x, y)):
+                        # 既存のAOI内をクリックした場合、新しいAOIの作成を開始しない
+                        return
+            # 新しいAOIの作成を開始
             self.drawing_aoi = True
             self.aoi_start_point = event.pos()
 
@@ -531,7 +593,7 @@ class GazeApp(QMainWindow):
             self.update_frame(draw_aoi_preview=True)
 
     def image_mouse_release_event(self, event):
-        if event.button() == Qt.LeftButton and self.is_configured:
+        if event.button() == Qt.LeftButton and self.is_configured and self.drawing_aoi:
             self.drawing_aoi = False
             self.aoi_end_point = event.pos()
             # AOIの矩形を計算
@@ -557,8 +619,66 @@ class GazeApp(QMainWindow):
                 end_x = (end.x() - offset_x) * scale_x
                 end_y = (end.y() - offset_y) * scale_y
                 rect = QRectF(QPointF(start_x, start_y), QPointF(end_x, end_y))
-                self.aoi_list.append(AOI(rect.normalized()))
+                aoi = AOI(rect.normalized())
+                self.aoi_list.append(aoi)
                 self.update_frame()
+
+    def image_mouse_double_click_event(self, event):
+        if self.is_configured:
+            # クリック位置を基準画像の座標に変換
+            pos = event.pos()
+            pixmap = self.image_label.pixmap()
+            if pixmap:
+                label_rect = self.image_label.contentsRect()
+                label_width = label_rect.width()
+                label_height = label_rect.height()
+                pixmap_width = pixmap.width()
+                pixmap_height = pixmap.height()
+                scaled_w = pixmap_width * min(label_width / pixmap_width, label_height / pixmap_height)
+                scaled_h = pixmap_height * min(label_width / pixmap_width, label_height / pixmap_height)
+                offset_x = (label_width - scaled_w) / 2
+                offset_y = (label_height - scaled_h) / 2
+                scale_x = pixmap_width / scaled_w
+                scale_y = pixmap_height / scaled_h
+                x = (pos.x() - offset_x) * scale_x
+                y = (pos.y() - offset_y) * scale_y
+                # AOIのリストを逆順にチェック（最後に追加されたものが最前面）
+                for aoi in reversed(self.aoi_list):
+                    if aoi.rect.contains(QPointF(x, y)):
+                        # 名前を変更するダイアログを表示
+                        text, ok = QInputDialog.getText(self, 'AOIの名前を設定', 'AOIの名前:', text=aoi.name)
+                        if ok:
+                            aoi.name = text
+                        break
+
+    def start_recording(self):
+        if not self.is_configured:
+            QMessageBox.warning(self, "エラー", "設定を完了してください。")
+            return
+        self.is_recording = True
+        self.recorded_data = []
+        self.frame_counter = 0
+        self.csv_filename = self.csv_filename_edit.text()
+        # ボタンの有効・無効を切り替え
+        self.record_start_button.setEnabled(False)
+        self.record_stop_button.setEnabled(True)
+
+    def stop_recording(self):
+        self.is_recording = False
+        # CSVファイルにデータを保存
+        try:
+            with open(self.csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['Frame', 'PicNum', 'GazeX', 'GazeY', 'AOI']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for data in self.recorded_data:
+                    writer.writerow(data)
+            QMessageBox.information(self, "保存完了", f"データを{self.csv_filename}に保存しました。")
+        except Exception as e:
+            QMessageBox.warning(self, "エラー", f"データの保存中にエラーが発生しました: {e}")
+        # ボタンの有効・無効を切り替え
+        self.record_start_button.setEnabled(True)
+        self.record_stop_button.setEnabled(False)
 
     def reset_counts(self):
         for aoi in self.aoi_list:
@@ -576,6 +696,7 @@ class GazeApp(QMainWindow):
                 frame_proc = shared_data['frame']
                 gaze_x = shared_data['gaze_x']
                 gaze_y = shared_data['gaze_y']
+                pic_num = shared_data['frame_num']
 
             if frame_proc is None:
                 return
@@ -681,6 +802,7 @@ class GazeApp(QMainWindow):
                                         ref_image_display, 1 - self.gaze_point_opacity, 0, ref_image_display)
 
                         # AOIの処理
+                        gaze_aoi_name = ''
                         for aoi in self.aoi_list:
                             # AOIの矩形を取得
                             rect = aoi.rect
@@ -688,6 +810,7 @@ class GazeApp(QMainWindow):
                             if rect.contains(QPointF(x_ref, y_ref)):
                                 aoi.is_gaze_inside = True
                                 aoi.hit_count += 1
+                                gaze_aoi_name = aoi.name
                             else:
                                 aoi.is_gaze_inside = False
 
@@ -702,14 +825,17 @@ class GazeApp(QMainWindow):
                                 rect_color = (0, 255, 0)
                             cv2.rectangle(ref_image_display, rect_top_left, rect_bottom_right, rect_color, 1)
 
-                            # ヒットカウントをAOIの上に表示
-                            count_text = f'Count: {aoi.hit_count}'
-                            text_size, baseline = cv2.getTextSize(count_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+                            # ヒットカウントまたは名前をAOIの上に表示
+                            if aoi.name:
+                                display_text = f'{aoi.name}: {aoi.hit_count}'
+                            else:
+                                display_text = f'無名: {aoi.hit_count}'
+                            text_size, baseline = cv2.getTextSize(display_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
                             text_x = rect_top_left[0]
                             text_y = rect_top_left[1] - 5
                             if text_y < 0:
                                 text_y = rect_bottom_right[1] + text_size[1] + 5
-                            cv2.putText(ref_image_display, count_text, (text_x, text_y),
+                            cv2.putText(ref_image_display, display_text, (text_x, text_y),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, rect_color, 1)
 
                         # AOIを描画中の場合、プレビューを表示
@@ -751,6 +877,18 @@ class GazeApp(QMainWindow):
 
                         # 画像をQt形式に変換して表示
                         self.display_image(ref_image_display)
+
+                        # レコード中の場合、データを記録
+                        if self.is_recording:
+                            self.frame_counter += 1
+                            data = {
+                                'Frame': self.frame_counter,
+                                'PicNum': pic_num,
+                                'GazeX': x_ref,
+                                'GazeY': y_ref,
+                                'AOI': gaze_aoi_name
+                            }
+                            self.recorded_data.append(data)
 
     def display_image(self, img):
         # BGRからRGBに変換
