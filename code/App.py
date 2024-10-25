@@ -87,6 +87,8 @@ class GazeApp(QMainWindow):
         self.show_fps = True
         self.previous_time = time.time()
         self.fps = 0
+        self.overlay_scene = False           # シーンカメラのオーバーレイ表示フラグ
+        self.scene_opacity = 0.5             # シーンカメラの透明度
 
         # 設定完了フラグ
         self.is_configured = False
@@ -244,6 +246,27 @@ class GazeApp(QMainWindow):
         fps_layout.addWidget(self.fps_checkbox)
         layout.addLayout(fps_layout)
 
+        # シーンカメラのオーバーレイ表示チェックボックス
+        overlay_layout = QHBoxLayout()
+        self.overlay_checkbox = QCheckBox('シーンカメラを重ねて表示')
+        self.overlay_checkbox.setChecked(self.overlay_scene)
+        self.overlay_checkbox.stateChanged.connect(self.toggle_overlay)
+        overlay_layout.addWidget(self.overlay_checkbox)
+        layout.addLayout(overlay_layout)
+
+        # シーンカメラの透明度調整スライダー
+        scene_opacity_layout = QHBoxLayout()
+        self.scene_opacity_slider = QSlider(Qt.Horizontal)
+        self.scene_opacity_slider.setMinimum(0)
+        self.scene_opacity_slider.setMaximum(100)
+        self.scene_opacity_slider.setValue(int(self.scene_opacity * 100))
+        self.scene_opacity_slider.setTickPosition(QSlider.TicksBelow)
+        self.scene_opacity_slider.setTickInterval(10)
+        self.scene_opacity_slider.valueChanged.connect(self.change_scene_opacity)
+        scene_opacity_layout.addWidget(QLabel('シーンカメラの透明度:'))
+        scene_opacity_layout.addWidget(self.scene_opacity_slider)
+        layout.addLayout(scene_opacity_layout)
+
         self.other_settings_group.setLayout(layout)
 
     def browse_image(self):
@@ -307,6 +330,7 @@ class GazeApp(QMainWindow):
         flann = cv2.FlannBasedMatcher(index_params, search_params)
 
         # フレームの歪み補正マップの事前計算（仮のフレームサイズで計算）
+        # ここでdummy_frameをref_imageと同じサイズにしておく
         dummy_frame = np.zeros_like(ref_image)
         map1_frame, map2_frame, roi_frame, new_camera_mtx_frame = precompute_undistort_map(dummy_frame.shape)
 
@@ -334,6 +358,9 @@ class GazeApp(QMainWindow):
     def change_opacity(self, value):
         self.gaze_point_opacity = value / 100.0
 
+    def change_scene_opacity(self, value):
+        self.scene_opacity = value / 100.0
+
     def select_color(self):
         color = QColorDialog.getColor()
         if color.isValid():
@@ -343,6 +370,9 @@ class GazeApp(QMainWindow):
 
     def toggle_fps(self, state):
         self.show_fps = state == Qt.Checked
+
+    def toggle_overlay(self, state):
+        self.overlay_scene = state == Qt.Checked
 
     def update_frame(self):
         if not self.is_configured:
@@ -418,7 +448,16 @@ class GazeApp(QMainWindow):
                         # 基準画像上に視線位置を描画
                         ref_image_display = ref_image.copy()
 
-                        # 透明度を適用
+                        # シーンカメラのオーバーレイが有効な場合
+                        if self.overlay_scene:
+                            # シーンカメラのフレームを基準画像の座標系に変換
+                            h_ref, w_ref = ref_image.shape[:2]
+                            warped_scene = cv2.warpPerspective(frame_undistorted, M, (w_ref, h_ref))
+                            # シーンカメラの透明度を適用
+                            cv2.addWeighted(warped_scene, self.scene_opacity,
+                                            ref_image_display, 1 - self.scene_opacity, 0, ref_image_display)
+
+                        # 視線ポイントの透明度を適用
                         overlay = ref_image_display.copy()
                         color = (*self.gaze_point_color,)
                         cv2.circle(overlay, (int(x_ref), int(y_ref)),
