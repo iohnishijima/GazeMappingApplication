@@ -9,11 +9,11 @@ import ast
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget,
     QSlider, QColorDialog, QPushButton, QCheckBox, QHBoxLayout, QSizePolicy,
-    QFileDialog, QLineEdit, QGridLayout, QMessageBox, QTextEdit, QGroupBox,
-    QSplitter, QAction, QGraphicsScene, QGraphicsView, QGraphicsPixmapItem, QGraphicsRectItem
+    QFileDialog, QLineEdit, QGridLayout, QMessageBox, QTextEdit,
+    QSplitter, QAction, QScrollArea, QToolButton
 )
-from PyQt5.QtGui import QImage, QPixmap, QColor, QIcon, QPainter, QPen
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QRectF, QPointF
+from PyQt5.QtGui import QImage, QPixmap, QColor, QIcon
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QRectF, QPointF, QPropertyAnimation
 
 # グローバル変数の初期化
 camera_matrix = None
@@ -80,6 +80,50 @@ class AOI:
         self.hit_count = 0
         self.is_gaze_inside = False  # 視線が内側にあるか
 
+# 折りたたみ可能なグループボックス
+class CollapsibleBox(QWidget):
+    def __init__(self, title="", parent=None):
+        super().__init__(parent)
+        self.toggle_button = QToolButton(text=title, checkable=True, checked=False)
+        self.toggle_button.setStyleSheet("QToolButton { border: none; }")
+        self.toggle_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle_button.setArrowType(Qt.RightArrow)
+        self.toggle_button.clicked.connect(self.on_toggle)
+
+        self.content_area = QWidget()
+        # self.content_area.setMaximumHeight(0)
+        self.content_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.content_area.setMinimumHeight(0)
+        self.content_area.setMaximumHeight(0)
+
+        self.animation = QPropertyAnimation(self.content_area, b"maximumHeight")
+        self.animation.setDuration(200)
+        self.animation.setStartValue(0)
+
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setSpacing(0)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.addWidget(self.toggle_button)
+        self.main_layout.addWidget(self.content_area)
+
+    def on_toggle(self):
+        checked = self.toggle_button.isChecked()
+        self.toggle_button.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        if checked:
+            # 展開時にコンテンツの高さを計算
+            content_height = self.content_area.layout().sizeHint().height()
+            self.animation.setEndValue(content_height)
+        else:
+            self.animation.setEndValue(0)
+        self.animation.start()
+
+    def setContentLayout(self, layout):
+        self.content_area.setLayout(layout)
+        # コンテンツの高さを再計算
+        content_height = layout.sizeHint().height()
+        self.animation.setEndValue(content_height)
+
 # PyQtアプリケーション
 class GazeApp(QMainWindow):
     def __init__(self):
@@ -102,6 +146,11 @@ class GazeApp(QMainWindow):
         self.is_configured = False           # 設定完了フラグ
         self.reset_requested = False         # カウントリセット要求フラグ
 
+        # 視線データの保持
+        self.gaze_history = []               # 視線座標の履歴
+        self.max_history = 100               # デフォルトの履歴フレーム数
+        self.heatmap_opacity = 0.5           # ヒートマップの透明度
+
         # UIのセットアップ
         self.init_ui()
 
@@ -123,9 +172,14 @@ class GazeApp(QMainWindow):
         main_widget.setLayout(main_layout)
 
         # サイドバー（左側）の作成
-        self.sidebar = QWidget()
+        self.sidebar_widget = QWidget()
         self.sidebar_layout = QVBoxLayout()
-        self.sidebar.setLayout(self.sidebar_layout)
+        self.sidebar_widget.setLayout(self.sidebar_layout)
+
+        # スクロールエリアでサイドバーを包む
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setWidget(self.sidebar_widget)
 
         # 初期設定グループの作成
         self.create_initial_settings_group()
@@ -133,9 +187,13 @@ class GazeApp(QMainWindow):
         # その他の設定グループの作成
         self.create_other_settings_group()
 
+        # ヒートマップ設定グループの作成
+        self.create_heatmap_settings_group()
+
         # サイドバーにグループを追加
         self.sidebar_layout.addWidget(self.initial_settings_group)
         self.sidebar_layout.addWidget(self.other_settings_group)
+        self.sidebar_layout.addWidget(self.heatmap_settings_group)
         self.sidebar_layout.addStretch()
 
         # 画像表示エリア
@@ -147,12 +205,12 @@ class GazeApp(QMainWindow):
         self.image_label.mouseReleaseEvent = self.image_mouse_release_event
 
         # サイドバーと画像ラベルをスプリッターに追加
-        self.splitter.addWidget(self.sidebar)
+        self.splitter.addWidget(self.scroll_area)
         self.splitter.addWidget(self.image_label)
         self.splitter.setStretchFactor(1, 1)  # 画像表示部分が伸縮するように設定
 
         # サイドバーの初期状態を開いた状態に設定
-        self.sidebar.setVisible(True)
+        self.sidebar_widget.setVisible(True)
 
         # メニューアクションの作成
         self.create_menu()
@@ -169,11 +227,12 @@ class GazeApp(QMainWindow):
         view_menu.addAction(toggle_sidebar_action)
 
     def toggle_sidebar(self, state):
-        self.sidebar.setVisible(state)
+        self.sidebar_widget.setVisible(state)
+        self.scroll_area.setVisible(state)
 
     def create_initial_settings_group(self):
         # 初期設定グループ
-        self.initial_settings_group = QGroupBox('初期設定')
+        self.initial_settings_group = CollapsibleBox('初期設定')
         layout = QVBoxLayout()
 
         # 画像ファイル選択
@@ -210,11 +269,11 @@ class GazeApp(QMainWindow):
         configure_button.clicked.connect(self.apply_settings)
         layout.addWidget(configure_button)
 
-        self.initial_settings_group.setLayout(layout)
+        self.initial_settings_group.setContentLayout(layout)
 
     def create_other_settings_group(self):
         # その他の設定グループ
-        self.other_settings_group = QGroupBox('その他の設定')
+        self.other_settings_group = CollapsibleBox('その他の設定')
         layout = QVBoxLayout()
 
         # 視線ポイントのサイズ調整スライダー
@@ -272,10 +331,11 @@ class GazeApp(QMainWindow):
         self.scene_opacity_slider.setMinimum(0)
         self.scene_opacity_slider.setMaximum(100)
         self.scene_opacity_slider.setValue(int(self.scene_opacity * 100))
+        scene_opacity_slider_label = QLabel('シーンカメラの透明度:')
         self.scene_opacity_slider.setTickPosition(QSlider.TicksBelow)
         self.scene_opacity_slider.setTickInterval(10)
         self.scene_opacity_slider.valueChanged.connect(self.change_scene_opacity)
-        scene_opacity_layout.addWidget(QLabel('シーンカメラの透明度:'))
+        scene_opacity_layout.addWidget(scene_opacity_slider_label)
         scene_opacity_layout.addWidget(self.scene_opacity_slider)
         layout.addLayout(scene_opacity_layout)
 
@@ -286,7 +346,51 @@ class GazeApp(QMainWindow):
         reset_layout.addWidget(self.reset_button)
         layout.addLayout(reset_layout)
 
-        self.other_settings_group.setLayout(layout)
+        self.other_settings_group.setContentLayout(layout)
+
+    def create_heatmap_settings_group(self):
+        # ヒートマップ設定グループ
+        self.heatmap_settings_group = CollapsibleBox('ヒートマップ設定')
+        layout = QVBoxLayout()
+
+        # ヒートマップの有効/無効
+        self.heatmap_checkbox = QCheckBox('ヒートマップを表示')
+        self.heatmap_checkbox.setChecked(False)
+        layout.addWidget(self.heatmap_checkbox)
+
+        # ヒートマップの透明度調整スライダー
+        heatmap_opacity_layout = QHBoxLayout()
+        self.heatmap_opacity_slider = QSlider(Qt.Horizontal)
+        self.heatmap_opacity_slider.setMinimum(0)
+        self.heatmap_opacity_slider.setMaximum(100)
+        self.heatmap_opacity_slider.setValue(int(self.heatmap_opacity * 100))
+        self.heatmap_opacity_slider.setTickPosition(QSlider.TicksBelow)
+        self.heatmap_opacity_slider.setTickInterval(10)
+        self.heatmap_opacity_slider.valueChanged.connect(self.change_heatmap_opacity)
+        heatmap_opacity_layout.addWidget(QLabel('ヒートマップの透明度:'))
+        heatmap_opacity_layout.addWidget(self.heatmap_opacity_slider)
+        layout.addLayout(heatmap_opacity_layout)
+
+        # ヒートマップの履歴フレーム数
+        history_layout = QHBoxLayout()
+        self.history_slider = QSlider(Qt.Horizontal)
+        self.history_slider.setMinimum(1)
+        self.history_slider.setMaximum(500)
+        self.history_slider.setValue(self.max_history)
+        self.history_slider.setTickPosition(QSlider.TicksBelow)
+        self.history_slider.setTickInterval(50)
+        self.history_slider.valueChanged.connect(self.change_history)
+        history_layout.addWidget(QLabel('履歴フレーム数:'))
+        history_layout.addWidget(self.history_slider)
+        layout.addLayout(history_layout)
+
+        self.heatmap_settings_group.setContentLayout(layout)
+
+    def change_heatmap_opacity(self, value):
+        self.heatmap_opacity = value / 100.0
+
+    def change_history(self, value):
+        self.max_history = value
 
     def reset_counts(self):
         for aoi in self.aoi_list:
@@ -513,6 +617,11 @@ class GazeApp(QMainWindow):
                             np.array([[[gaze_x_ud, gaze_y_ud]]], dtype=np.float32), M)
                         x_ref, y_ref = gaze_point_ref[0][0]
 
+                        # 視線データを履歴に追加
+                        self.gaze_history.append((int(x_ref), int(y_ref)))
+                        if len(self.gaze_history) > self.max_history:
+                            self.gaze_history.pop(0)
+
                         # 基準画像上に視線位置を描画
                         ref_image_display = ref_image.copy()
 
@@ -524,6 +633,17 @@ class GazeApp(QMainWindow):
                             # シーンカメラの透明度を適用
                             cv2.addWeighted(warped_scene, self.scene_opacity,
                                             ref_image_display, 1 - self.scene_opacity, 0, ref_image_display)
+
+                        # ヒートマップの作成と適用
+                        if self.heatmap_checkbox.isChecked() and len(self.gaze_history) > 0:
+                            heatmap = np.zeros((ref_image.shape[0], ref_image.shape[1]), dtype=np.float32)
+                            for point in self.gaze_history:
+                                cv2.circle(heatmap, point, self.gaze_point_size, 1, -1)
+                            heatmap = cv2.GaussianBlur(heatmap, (0, 0), sigmaX=15, sigmaY=15)
+                            heatmap = cv2.normalize(heatmap, None, 0, 255, cv2.NORM_MINMAX)
+                            heatmap_color = cv2.applyColorMap(heatmap.astype(np.uint8), cv2.COLORMAP_JET)
+                            cv2.addWeighted(heatmap_color, self.heatmap_opacity,
+                                            ref_image_display, 1 - self.heatmap_opacity, 0, ref_image_display)
 
                         # 視線ポイントの透明度を適用
                         overlay = ref_image_display.copy()
